@@ -1,0 +1,10 @@
+{
+  "name": "Maria Lopez",
+  "phone": "(602) 555-0142",
+  "email": "maria.lopez@example.com",
+  "address": "1450 E Main St, Mesa, AZ 85203",
+  "monthly_electric_bill": 310,
+  "roof_age_years": 18,
+  "homeowner": true,
+  "notes": "Summer bills over $400. Husband is on board. Asked how soon an installer could come out."
+}

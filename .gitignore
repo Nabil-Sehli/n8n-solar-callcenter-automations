@@ -1,0 +1,25 @@
+# Secrets and local config
+.env
+.env.*
+*.pem
+*.key
+credentials*.json
+!samples/*.json
+
+# n8n local data (if you mount ~/.n8n into the repo)
+.n8n/
+n8n_data/
+*.sqlite
+*.sqlite-journal
+
+# Exports that may contain decrypted credentials or execution data
+exports/
+*-decrypted.json
+
+# Node / OS / editor
+node_modules/
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

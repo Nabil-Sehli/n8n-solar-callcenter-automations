@@ -1,0 +1,16 @@
+{
+  "name": "n8n-solar-callcenter-automations",
+  "version": "1.0.0",
+  "private": true,
+  "description": "n8n workflows for a solar and roofing outbound call center: AI lead qualification and missed-call SMS follow-up.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node scripts/build-workflows.mjs",
+    "validate": "node scripts/validate-workflows.mjs",
+    "test": "node --test \"test/*.test.mjs\"",
+    "check": "npm run build && npm run validate && npm test"
+  }
+}
