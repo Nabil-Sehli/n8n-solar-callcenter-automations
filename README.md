@@ -7,7 +7,7 @@ Two importable n8n workflows for an outbound call center that books appointments
 | AI Lead Qualification | [`workflows/ai-lead-qualification.json`](workflows/ai-lead-qualification.json) | Scores every new lead 0-100 with Claude, logs it, returns the score to the caller, alerts a closer on hot leads |
 | Missed Call SMS Follow-up | [`workflows/missed-call-followup.json`](workflows/missed-call-followup.json) | Drafts a compliant follow-up text after a missed call, logs it, sends one more after an hour if there's no reply |
 
-Stack: n8n Community Edition (self-hosted, Docker), Anthropic API through the core **HTTP Request** node (no community nodes), Google Sheets, SMTP email. No paid SMS provider yet. There's a marked placeholder where one slots in.
+Stack: n8n Community Edition (self-hosted, Docker), an LLM called through the core **HTTP Request** node (no community nodes), Google Sheets, SMTP email. The LLM is **Anthropic Claude by default**, with a one-field switch to **Google Gemini** (see [Switching the LLM provider](#switching-the-llm-provider)). No paid SMS provider yet. There's a marked placeholder where one slots in.
 
 ---
 
@@ -25,7 +25,9 @@ This workflow scores each lead the moment it arrives. Hot leads reach a closer i
 flowchart LR
   A[Webhook: New Lead] --> B[Validate Lead] --> C{Is Lead Valid?}
   C -- no --> X[Respond: Invalid Lead 400]
-  C -- yes --> D[Config & Prompt] --> E[Build Claude Request] --> F[Claude: Score Lead] --> G[Parse Score]
+  C -- yes --> D[Config & Prompt] --> E[Build LLM Request] --> U{Use Gemini?}
+  U -- no --> F[Claude: Score Lead] --> G[Parse Score]
+  U -- yes --> F2[Gemini: Score Lead] --> G
   G --> H[Log Lead to Sheet] --> I[Respond with Score] --> J{Hot or Needs Review?}
   J -- yes --> K[Email: Hot Lead Alert]
   J -- no --> L[Nurture Plan] --> M[Email: Nurture Queue]
@@ -39,10 +41,12 @@ flowchart LR
 | **Validate Lead** | Code 2 (each item) | Real payloads are messy: `"$250/mo"`, `"yes"`, `(602) 555-0142`. Coerces types once, normalizes phone to E.164, and keeps an unknown `homeowner` as `null` instead of guessing `false`. |
 | **Is Lead Valid?** | IF 2.3 | Garbage in never reaches the paid API. |
 | **Respond: Invalid Lead** | Respond to Webhook 1.5, 400 | The sender gets a clear list of what's wrong and can fix it. It's not a silent 200. |
-| **Config & Prompt** | Set 3.5 | **Prompt, model, effort, tier thresholds, renter cap and email recipients in one place**, editable without touching code. A sales manager can change "hot = 70" here. |
-| **Build Claude Request** | Code 2 (each item) | Plumbing only. Fills the prompt placeholders, wraps lead data in `<lead>` tags and strips that tag from `notes` so free text can't pose as instructions. **Phone and email are never sent to the model** because it doesn't need them to score. |
+| **Config & Prompt** | Set 3.5 | **Prompt, LLM provider and model, tier thresholds, renter cap and email recipients in one place**, editable without touching code. A sales manager can change "hot = 70" here. |
+| **Build LLM Request** | Code 2 (each item) | Plumbing only. Fills the prompt placeholders, wraps lead data in `<lead>` tags and strips that tag from `notes` so free text can't pose as instructions. Builds the body for the selected provider from **the same prompt text**. **Phone and email are never sent to the model** because it doesn't need them to score. An unknown `llm_provider` fails the run loudly. |
+| **Use Gemini?** | IF 2.3 | `llm_provider == "gemini"` goes to Gemini. Everything else (the default `anthropic`) goes to Claude. |
 | **Claude: Score Lead** | HTTP Request 4.5 → `POST https://api.anthropic.com/v1/messages` | Core node, as required. Auth uses n8n's built-in **Anthropic** credential type (it injects `x-api-key`), so no key sits in the node. Retries 3× with 5s between tries (429/529 overloads happen). **On error, continue**, so the lead still flows to the parser and gets logged. 120s timeout (the default is 10s). |
-| **Parse Score** | Code 2 (each item) | Defensive parsing (details below). Never throws. Any failure produces `scoring_status: "failed"`. |
+| **Gemini: Score Lead** | HTTP Request 4.5 → `POST .../v1beta/models/{model}:generateContent` | Same retry, continue-on-error and timeout settings. Auth is a **Header Auth** credential sending `x-goog-api-key`. n8n's built-in Gemini credential puts the key in the URL (`?key=`), where it can leak into error messages and logs. |
+| **Parse Score** | Code 2 (each item) | **One parser for both providers** (details below). Never throws. Any failure produces `scoring_status: "failed"`. |
 | **Log Lead to Sheet** | Google Sheets 4.7, append | Every lead, scored or not, lands in the `Leads` tab. Cell format **RAW** so `+16025550142` stays text and a `notes` value starting with `=` isn't run as a formula. |
 | **Respond with Score** | Respond to Webhook 1.5, 200 | Sent **after** the Sheet write. If Sheets is down the caller gets an error and can retry, so a lead is never acknowledged and then lost. |
 | **Hot or Needs Review?** | IF 2.3, OR | `tier == hot` **or** `scoring_status == failed`. A lead the AI couldn't score goes to a human right away. Parking it in nurture could bury a hot lead. |
@@ -52,11 +56,13 @@ flowchart LR
 
 ### How "Parse Score" handles bad model output
 
+A `readLlmResponse` step first turns either provider's response into plain text. Everything after it is shared.
+
 1. **HTTP failure after retries** (`$json.error`) → `failed`, with the API message in `reason`.
-2. **`stop_reason: "refusal"`** (returned as HTTP 200) → `failed`.
-3. **Thinking blocks:** Claude Opus 5 thinks by default, so `content[0]` may be a `thinking` block. The parser joins every `type: "text"` block instead of reading `content[0].text`.
+2. **Declined requests** (both return HTTP 200): Claude `stop_reason: "refusal"`; Gemini `promptFeedback.blockReason`, or `finishReason` of `SAFETY` / `BLOCKLIST` / `PROHIBITED_CONTENT` / `SPII` / `RECITATION` → `failed`.
+3. **Thinking output is skipped.** Claude Opus 5 thinks by default, so `content[0]` may be a `thinking` block, and the parser joins every `type: "text"` block. For Gemini it joins `candidates[0].content.parts[].text`, skipping parts flagged `thought: true`.
 4. **Markdown fences:** pulls the JSON out of a ```` ```json ```` block if there is one, otherwise takes the first `{` to the last `}`, so prose around it is ignored.
-5. **`JSON.parse` fails** → `failed`, and the reason says "truncated" if `stop_reason` was `max_tokens`.
+5. **`JSON.parse` fails** → `failed`, and the reason says "truncated" if Claude's `stop_reason` was `max_tokens` or Gemini's `finishReason` was `MAX_TOKENS`.
 6. **Validates instead of trusting:** score must be numeric, is clamped to 0-100 and rounded. Renters are capped at `renter_max_score` **in code**. The **tier is derived from the score and thresholds**, so routing never depends on the model being self-consistent. The model's own tier is kept as `model_tier` for prompt tuning.
 
 Response body:
@@ -84,7 +90,10 @@ flowchart LR
   A[Webhook: Missed Call] --> B[Validate Missed Call] --> C{Is Payload Valid?}
   C -- no --> X[Respond: Invalid Payload 400]
   C -- yes --> D[Respond: Accepted 202] --> E[Config & Prompt] --> F[Wait 2 Minutes]
-  F --> G[Build SMS Request] --> H[Claude: Draft SMS] --> I[Enforce SMS Rules] --> J[SMS Provider placeholder]
+  F --> G[Build SMS Request] --> U{Use Gemini?}
+  U -- no --> H[Claude: Draft SMS] --> I[Enforce SMS Rules]
+  U -- yes --> H2[Gemini: Draft SMS] --> I
+  I --> J[SMS Provider placeholder]
   J --> K[Email: SMS Preview] --> L[Log SMS Attempt] --> M{More Attempts Allowed?}
   M -- no --> N[Done: Max Attempts Reached]
   M -- yes --> O[Wait 1 Hour] --> P[Read Reply Flag] --> Q[Check Reply Flag] --> R{Send Follow-up?}
@@ -100,11 +109,12 @@ flowchart LR
 | **Validate Missed Call** | Code 2 (each item) | Normalizes phone and validates `missed_at`. Creates `followup_id = mc-<execution id>` to tie every attempt and Sheet row to this one missed call. Maps the internal campaign code (`AZ-FB-SOLAR-Q3`) to a plain label (`solar`), so **internal codes never reach a homeowner's phone**. |
 | **Is Payload Valid?** / **Respond: Invalid Payload** | IF 2.3 / Respond 1.5 (400) | The dialer learns about bad data immediately, not an hour later in a failed execution. |
 | **Respond: Accepted** | Respond 1.5, **202** | Answers the dialer right away. The rest of the run takes over an hour, and nothing should hold an HTTP connection open that long. |
-| **Config & Prompt** | Set 3.5 | Company name, callback number, opt-out line, 160-char limit, `max_attempts`, model settings, prompt and per-attempt guidance. All editable, no code. |
+| **Config & Prompt** | Set 3.5 | Company name, callback number, opt-out line, 160-char limit, `max_attempts`, LLM provider and model, prompt and per-attempt guidance. All editable, no code. |
 | **Wait 2 Minutes** | Wait 1.1 | Homeowners often call straight back after a missed call. Texting instantly feels robotic and can cross a callback. Waits over 65s are saved to the database, so no memory is held and it survives a restart. |
 | **Build SMS Request** | Code 2 (each item) | Runs for attempt 1 and again for attempt 2 (loop). Sends only first name, service label, callback number and attempt. **No phone number, no campaign code, no timestamp** (the model can't know the contact's time zone, so it can't say "at 2pm"). |
-| **Claude: Draft SMS** | HTTP Request 4.5 | Same configuration as workflow 1: Anthropic credential, retries, continue on error. |
-| **Enforce SMS Rules** | Code 2 (each item) | **The prompt asks for compliance; this node guarantees it** (details below). |
+| **Use Gemini?** | IF 2.3 | Same provider switch as workflow 1. |
+| **Claude: Draft SMS** / **Gemini: Draft SMS** | HTTP Request 4.5 | Same configuration as workflow 1: credential by name, retries, continue on error. Gemini output is plain text (no JSON mode). |
+| **Enforce SMS Rules** | Code 2 (each item) | **The prompt asks for compliance; this node guarantees it**, whichever provider wrote the draft (details below). |
 | **SMS Provider (placeholder)** | No Operation | **Where Twilio / Telnyx / Vonage goes.** Marked with a red sticky note and an on-canvas note. It passes data through unchanged, so swapping it in changes nothing else. |
 | **Email: SMS Preview** | Send Email 2.1 | "Send as email for now": shows exactly what would be texted, its length, and what was auto-fixed. Reads fields from **Enforce SMS Rules** by name, so it still works after the placeholder is replaced. |
 | **Log SMS Attempt** | Google Sheets 4.7, append (RAW) | `SMS Log` tab: timestamp, contact, phone, campaign, attempt, message, length, source, fixes, and empty `replied` / `opted_out` columns for reps to fill. |
@@ -120,7 +130,7 @@ flowchart LR
 - **One 160-character segment.** 160 is the GSM-7 limit. A single curly apostrophe or emoji switches the whole message to UCS-2, where a segment is only **70** characters and the text gets split and billed as several. The node converts smart quotes and dashes to ASCII, drops emojis and GSM-7 extension characters (`[]{}\^~|` count double), and collapses whitespace.
 - **Exact opt-out line, exactly once.** Removes whatever opt-out wording the model wrote ("Text STOP to unsubscribe") and appends the configured line.
 - **Sender identified.** If the company name is missing it gets prefixed.
-- **Safe fallback.** On refusal, API error, an empty draft, or a draft that's still too long, a fixed template is used (with shorter versions for long names). `sms_source` and `sms_issues` record what happened.
+- **Safe fallback.** On refusal or block, API error, an empty or truncated draft, or a draft that's still too long, a fixed template is used (with shorter versions for long names). `sms_source` (`llm` or `fallback_template`) and `sms_issues` record what happened.
 
 ---
 
@@ -128,12 +138,15 @@ flowchart LR
 
 **Prerequisite:** built and tested against **n8n 2.38.7**. Check your version under *Settings → About n8n*. Older 1.x instances may not have IF 2.3, Set 3.5, Google Sheets 4.7 or Respond to Webhook 1.5 (see [Verify on import](#verify-on-import)).
 
-1. **Create three credentials** with these exact names. Nodes reference credentials by name with `"id": null`, and n8n links each one to the credential of that type and name on import.
-   | Name | Type |
-   |---|---|
-   | `Anthropic account` | Anthropic |
-   | `SMTP account` | SMTP (for Gmail use `smtp.gmail.com`, port 465, SSL, an app password) |
-   | `Google Sheets account` | Google Sheets OAuth2 API |
+1. **Create the credentials** with these exact names **before** importing. Nodes reference credentials by name with `"id": null`, and n8n links each one to the credential of that type and name on import.
+   | Name | Type | Needed when |
+   |---|---|---|
+   | `Anthropic account` | Anthropic | `llm_provider` is `anthropic` (default) |
+   | `Gemini API key` | Header Auth, **Name** `x-goog-api-key`, **Value** your key from [Google AI Studio](https://aistudio.google.com/apikey) | `llm_provider` is `gemini` |
+   | `SMTP account` | SMTP (for Gmail use `smtp.gmail.com`, port 465, SSL, an app password) | always |
+   | `Google Sheets account` | Google Sheets OAuth2 API | always |
+
+   You only need the LLM credential for the provider you use. The other LLM node stays unlinked and never runs.
 2. **Create a Google Sheet** with two tabs and paste the header rows:
    - `Leads`: header row from [`sheets/Leads.csv`](sheets/Leads.csv)
    - `SMS Log`: header row from [`sheets/SMS Log.csv`](sheets/SMS%20Log.csv)
@@ -145,6 +158,36 @@ flowchart LR
 4. **Paste your spreadsheet ID** (the long id in the Sheet URL) into **Log Lead to Sheet**, **Log SMS Attempt** and **Read Reply Flag**, replacing `REPLACE_WITH_YOUR_SPREADSHEET_ID`.
 5. **Edit `Config & Prompt`** in each workflow: company name, callback number, recipient emails.
 6. **Publish** each workflow to enable its production webhook URL.
+
+## Switching the LLM provider
+
+Both workflows read the same fields in **Config & Prompt**:
+
+| Field | Default | Notes |
+|---|---|---|
+| `llm_provider` | `anthropic` | `anthropic` or `gemini`. Any other value fails the run with a clear error instead of silently picking one. |
+| `anthropic_model` | `claude-opus-5` | |
+| `anthropic_effort` | `low` | `output_config.effort`: `low` / `medium` / `high` / `xhigh` / `max` |
+| `gemini_model` | `gemini-3.5-flash` | Stable, and free of charge on Gemini's free tier at the time of writing |
+| `gemini_thinking_level` | `low` | `generationConfig.thinkingConfig.thinkingLevel` |
+| `max_tokens` | 8000 / 4000 | Sent as `max_tokens` or `maxOutputTokens`. **Both providers count thinking tokens against it**, so keep it generous. |
+
+To switch, set `llm_provider` to `gemini` in **Config & Prompt**, create the `Gemini API key` credential, and open **Gemini: Score Lead** / **Gemini: Draft SMS** once to confirm the credential is selected.
+
+**What stays the same:** the system prompts (`prompts/*.txt`), the lead data sent, the JSON output contract (`score`, `tier`, `reason`, `suggested_opener`), the parser, the SMS enforcement and every downstream node.
+
+**What differs:**
+
+| | Anthropic | Gemini |
+|---|---|---|
+| Endpoint | `POST /v1/messages` | `POST /v1beta/models/{model}:generateContent` |
+| Auth | Anthropic credential (`x-api-key`) | Header Auth credential (`x-goog-api-key`) |
+| Prompt fields | `system`, `messages` | `systemInstruction`, `contents` |
+| JSON help | Prompt only | Prompt plus `responseMimeType: application/json` (lead scoring only) |
+| Refusal fallback | `fallbacks: "default"` (beta header) | None; a block becomes `failed` / the SMS template |
+| Sampling | Defaults | Defaults (Google recommends not changing temperature on Gemini 3) |
+
+> **Before using Gemini's free tier with real leads:** Google's pricing page says free-tier content is **"Used to improve our products: Yes"** (paid tier: No). The lead workflow sends names, addresses and notes, though never phone or email. Use synthetic leads on the free tier, or turn on billing for real homeowner data. Free-tier rate limits are low and change; see your limits in [AI Studio](https://aistudio.google.com/rate-limit). A burst of leads will hit 429s, which the retries soften but don't remove.
 
 ## Test
 
@@ -180,11 +223,11 @@ On Windows PowerShell, call `curl.exe` explicitly (plain `curl` is an alias for 
 ### Checks in this repo
 
 ```bash
-npm run check   # rebuild JSON, validate it, run 31 unit tests (Node 20+, no dependencies)
+npm run check   # rebuild JSON, validate it, run 43 unit tests (Node 20+, no dependencies)
 ```
 
 - `scripts/validate-workflows.mjs` checks the required top-level keys, the workflow id (the CLI import fails without one), unique UUID node ids and names, node type/typeVersion against n8n 2.38.7, webhookIds, no overlapping nodes, no unconnected nodes, name-only credentials, **every `$('Node Name')` reference pointing at a real node** (catches renames), and secret patterns.
-- `test/code-nodes.test.mjs` runs the JavaScript **from the built workflow JSON** against fences, thinking blocks, prose-wrapped JSON, refusals, HTTP errors, truncation, renter caps, emojis, smart quotes, over-length drafts, long names and reply/opt-out flags.
+- `test/code-nodes.test.mjs` runs the JavaScript **from the built workflow JSON** against both providers' response shapes: fences, thinking blocks and thought parts, prose-wrapped JSON, refusals and blocks, HTTP errors, truncation, renter caps, emojis, smart quotes, over-length drafts, long names and reply/opt-out flags.
 
 ### What was verified end to end
 
@@ -214,12 +257,14 @@ These are the parts that could **not** be proven offline:
 4. **Real model output quality.** The mock proved the plumbing, not the scoring. Run the samples with your real key and read the scores, reasons and SMS drafts.
 5. **Credential auto-linking** only happens when exactly one credential of that type has that exact name. Otherwise open each **Claude:**, **Email:** and **Sheets** node and select the credential.
 6. **Anthropic credential in HTTP Request.** Confirmed from the n8n source (the credential picker accepts any type with `authenticate`) and in the e2e run, but if your instance doesn't list *Anthropic* under *Predefined Credential Type*, switch to *Generic Credential Type → Header Auth* with header `x-api-key`.
+7. **Gemini request details.** The endpoint, `x-goog-api-key` header, `thinkingConfig.thinkingLevel` and `responseMimeType` follow Google's current docs, and parsing of thought parts and `finishReason` is unit-tested. Google's pages disagree on whether REST wants `low` or `LOW`, so if Gemini returns a 400 mentioning `thinkingLevel`, change `gemini_thinking_level` to `LOW`.
 
 ---
 
 ## Design choices worth knowing
 
-- **Model:** `claude-opus-5` with `effort: "low"`. Scoring and a 160-char draft are short tasks, and low effort is the main latency and cost lever. `max_tokens` covers thinking **plus** the answer, which is why it's 8000/4000 rather than a few hundred. It's a ceiling, not what you pay for. Change the model or effort in **Config & Prompt**. Measure a cheaper model against the eval set below before switching.
+- **Provider switch in config, not in code paths.** One field picks the LLM. The prompt, output contract and parser are shared, so switching providers changes cost and quality, not behavior.
+- **Model:** `claude-opus-5` with `effort: "low"` by default. Scoring and a 160-char draft are short tasks, and low effort is the main latency and cost lever. `max_tokens` covers thinking **plus** the answer, which is why it's 8000/4000 rather than a few hundred. It's a ceiling, not what you pay for. Change the model or effort in **Config & Prompt**. Measure a cheaper model against the eval set below before switching.
 - **Hard rules in code, judgment in the model.** Tier thresholds, the renter cap, SMS length, opt-out wording and sender ID are deterministic. Claude does what code can't: reading notes and writing natural copy.
 - **Log before acknowledging.** A 200 means the lead is saved.
 - **Failures go to people, not to `/dev/null`.** An API outage turns into manual-review emails, not dropped leads.

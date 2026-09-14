@@ -1,17 +1,64 @@
 // n8n Code node "Parse Score" (Run Once for Each Item)
-// Defensive parser. The model is told to return bare JSON, but we never rely
-// on that. It may wrap JSON in ```json fences, add prose, get cut off at
-// max_tokens, refuse, or the HTTP call may fail after its retries.
-// Every failure becomes scoring_status "failed" (routed to a human) instead
-// of an exception, because a dropped lead is lost revenue.
+// Defensive parser for either provider. The model is told to return bare
+// JSON, but we never rely on that: it may wrap JSON in ```json fences, add
+// prose, get cut off at the token limit, decline, or the HTTP call may fail
+// after its retries. Every failure becomes scoring_status "failed" (routed to
+// a human) instead of an exception, because a dropped lead is lost revenue.
 
 const lead = $('Validate Lead').item.json;
 const cfg = $('Config & Prompt').item.json;
+const llm = $('Build LLM Request').item.json;
 const res = $json;
 
 const HOT = Number(cfg.hot_threshold);
 const WARM = Number(cfg.warm_threshold);
 const RENTER_MAX = Number(cfg.renter_max_score);
+
+// Normalizes an Anthropic Messages or Gemini generateContent response into
+// { text, truncated, model } or { failure }.
+const readLlmResponse = (r) => {
+  if (r?.error) {
+    const msg = typeof r.error === 'string' ? r.error : r.error.message ?? JSON.stringify(r.error);
+    return { failure: `API error (${String(msg).slice(0, 200)})` };
+  }
+  if (Array.isArray(r?.candidates) || r?.promptFeedback) {
+    // Gemini. Thought summaries are parts flagged thought: true; skip them.
+    if (r.promptFeedback?.blockReason) return { failure: `model declined the request (${r.promptFeedback.blockReason})` };
+    const candidate = r.candidates?.[0];
+    const finish = candidate?.finishReason ?? 'unknown';
+    if (['SAFETY', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII', 'RECITATION'].includes(finish)) {
+      return { failure: `model declined the request (${finish})` };
+    }
+    const text = (candidate?.content?.parts ?? [])
+      .filter((p) => p && typeof p.text === 'string' && !p.thought)
+      .map((p) => p.text)
+      .join('\n')
+      .trim();
+    return { text, truncated: finish === 'MAX_TOKENS', stop: finish, model: r.modelVersion };
+  }
+  // Anthropic. Opus 5 thinks by default, so content[0] may be a thinking
+  // block. Join every text block instead of assuming a position.
+  if (r?.stop_reason === 'refusal') return { failure: 'model declined the request' };
+  const text = Array.isArray(r?.content)
+    ? r.content
+        .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+        .map((b) => b.text)
+        .join('\n')
+        .trim()
+    : '';
+  return { text, truncated: r?.stop_reason === 'max_tokens', stop: r?.stop_reason, model: r?.model };
+};
+
+const extractJson = (text) => {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fenced ? fenced[1] : text;
+  const start = candidate.indexOf('{');
+  const end = candidate.lastIndexOf('}');
+  if (start === -1 || end <= start) throw new Error('no JSON object found');
+  return JSON.parse(candidate.slice(start, end + 1));
+};
+
+const read = readLlmResponse(res);
 
 const base = {
   timestamp: new Date().toISOString(),
@@ -23,7 +70,7 @@ const base = {
   roof_age_years: lead.roof_age_years,
   homeowner: lead.homeowner,
   notes: lead.notes,
-  model: res?.model ?? cfg.model,
+  model: read.model ?? llm.llm_model,
   execution_id: $execution.id,
 };
 
@@ -38,41 +85,14 @@ const failed = (why) => ({
   },
 });
 
-// Opus 5 thinks by default, so content[0] may be a thinking block.
-// Join every text block instead of assuming a position.
-const extractText = (r) =>
-  Array.isArray(r?.content)
-    ? r.content
-        .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
-        .map((b) => b.text)
-        .join('\n')
-        .trim()
-    : '';
-
-const extractJson = (text) => {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidate = fenced ? fenced[1] : text;
-  const start = candidate.indexOf('{');
-  const end = candidate.lastIndexOf('}');
-  if (start === -1 || end <= start) throw new Error('no JSON object found');
-  return JSON.parse(candidate.slice(start, end + 1));
-};
-
-if (res?.error) {
-  const msg = typeof res.error === 'string' ? res.error : res.error.message ?? JSON.stringify(res.error);
-  return failed(`API error (${String(msg).slice(0, 200)})`);
-}
-if (res?.stop_reason === 'refusal') return failed('model declined the request');
-
-const text = extractText(res);
-if (!text) return failed(`empty response (stop_reason: ${res?.stop_reason ?? 'unknown'})`);
+if (read.failure) return failed(read.failure);
+if (!read.text) return failed(`empty response (${read.stop ?? 'unknown'})`);
 
 let parsed;
 try {
-  parsed = extractJson(text);
+  parsed = extractJson(read.text);
 } catch (e) {
-  const hint = res?.stop_reason === 'max_tokens' ? 'response truncated at max_tokens' : 'response was not valid JSON';
-  return failed(hint);
+  return failed(read.truncated ? 'response truncated at the token limit' : 'response was not valid JSON');
 }
 
 let score = Number(parsed.score);

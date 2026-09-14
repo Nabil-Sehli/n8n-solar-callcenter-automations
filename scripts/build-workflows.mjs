@@ -30,6 +30,9 @@ const workflowId = (slug) => {
 // credential of that type and name and links it (replaceInvalidCredentials).
 const CREDENTIALS = {
   anthropic: { anthropicApi: { id: null, name: 'Anthropic account' } },
+  // Generic Header Auth (x-goog-api-key). n8n's built-in Gemini credential
+  // sends the key as a ?key= URL query parameter, which can leak into logs.
+  gemini: { httpHeaderAuth: { id: null, name: 'Gemini API key' } },
   smtp: { smtp: { id: null, name: 'SMTP account' } },
   sheets: { googleSheetsOAuth2Api: { id: null, name: 'Google Sheets account' } },
 };
@@ -141,7 +144,7 @@ const claudeRequest = (name, position) => ({
     },
     sendBody: true,
     specifyBody: 'json',
-    jsonBody: '={{ JSON.stringify($json.claude_request) }}',
+    jsonBody: '={{ JSON.stringify($json.llm_request) }}',
     options: { timeout: 120000 },
   },
   credentials: CREDENTIALS.anthropic,
@@ -150,6 +153,37 @@ const claudeRequest = (name, position) => ({
   waitBetweenTries: 5000,
   onError: 'continueRegularOutput',
 });
+
+const geminiRequest = (name, position) => ({
+  name,
+  type: 'n8n-nodes-base.httpRequest',
+  typeVersion: 4.5,
+  position,
+  parameters: {
+    method: 'POST',
+    url: '=https://generativelanguage.googleapis.com/v1beta/models/{{ encodeURIComponent($json.llm_model) }}:generateContent',
+    authentication: 'genericCredentialType',
+    genericAuthType: 'httpHeaderAuth',
+    sendBody: true,
+    specifyBody: 'json',
+    jsonBody: '={{ JSON.stringify($json.llm_request) }}',
+    options: { timeout: 120000 },
+  },
+  credentials: CREDENTIALS.gemini,
+  retryOnFail: true,
+  maxTries: 3,
+  waitBetweenTries: 5000,
+  onError: 'continueRegularOutput',
+});
+
+// Shared config fields for the provider switch. Anthropic stays the default.
+const PROVIDER_CONFIG = {
+  llm_provider: 'anthropic',
+  anthropic_model: 'claude-opus-5',
+  anthropic_effort: 'low',
+  gemini_model: 'gemini-3.5-flash',
+  gemini_thinking_level: 'low',
+};
 
 const email = (name, { from, to, subject, text }, position) => ({
   name,
@@ -260,29 +294,29 @@ function buildLeadQualification() {
 
   wf.add(sticky(wf, 'Note: Overview', [
     '## AI Lead Qualification',
-    'POST a lead, Claude scores it 0-100, every lead is logged, the caller gets the score back, then hot leads alert a closer and the rest go to nurture.',
+    'POST a lead, an LLM scores it 0-100 (Claude by default, Gemini optional), every lead is logged, the caller gets the score back, then hot leads alert a closer and the rest go to nurture.',
     '',
     '**Before activating**',
-    '1. Credentials: `Anthropic account`, `SMTP account`, `Google Sheets account`',
+    '1. Credentials: `Anthropic account` (or `Gemini API key`), `SMTP account`, `Google Sheets account`',
     '2. Paste your spreadsheet ID into **Log Lead to Sheet**',
-    '3. Set emails and thresholds in **Config & Prompt**',
+    '3. Set provider, emails and thresholds in **Config & Prompt**',
   ].join('\n'), [-60, -240], 520, 380, 7));
 
-  wf.add(sticky(wf, 'Note: Claude scoring', [
-    '### Claude scoring',
-    'Prompt, model, effort and tier thresholds live in **Config & Prompt** (no code).',
+  wf.add(sticky(wf, 'Note: LLM scoring', [
+    '### LLM scoring',
+    'Prompt, provider, model and tier thresholds live in **Config & Prompt** (no code). Set `llm_provider` to `anthropic` (default) or `gemini`.',
     '',
-    '**Claude: Score Lead** is a plain HTTP Request using the n8n Anthropic credential. It retries 3 times, then continues on error so **Parse Score** can mark the lead `failed` and send it to a human instead of dropping it.',
+    '**Use Gemini?** routes to one plain HTTP Request node. Both retry 3 times, then continue on error so **Parse Score** can mark the lead `failed` and send it to a human instead of dropping it.',
     '',
-    '**Parse Score** strips ```json fences, ignores thinking blocks, clamps the score and derives the tier from the thresholds.',
-  ].join('\n'), [680, -240], 980, 380, 5));
+    '**Parse Score** reads either response shape, strips ```json fences, skips thinking parts, clamps the score and derives the tier from the thresholds.',
+  ].join('\n'), [680, -240], 1220, 380, 5));
 
   wf.add(sticky(wf, 'Note: Log, respond, route', [
     '### Log first, respond, then notify',
     'The lead is written to the Sheet **before** the webhook responds. If the Sheet write fails the caller gets an error and can retry, so a lead is never acknowledged but lost.',
     '',
-    'Hot leads, and leads Claude could not score, email a closer right away. Warm and cold leads get a cadence and go to the nurture inbox.',
-  ].join('\n'), [1680, -240], 1080, 380, 4));
+    'Hot leads, and leads the AI could not score, email a closer right away. Warm and cold leads get a cadence and go to the nurture inbox.',
+  ].join('\n'), [1920, -240], 1080, 380, 4));
 
   const hook = wf.add(webhook(wf, 'Webhook: New Lead', 'lead-qualification', [0, 300]));
   const validate = wf.add(code('Validate Lead', 'code-nodes/lead-qualification/validate-lead.js', 'runOnceForEachItem', [240, 300]));
@@ -295,8 +329,7 @@ function buildLeadQualification() {
   ));
   const config = wf.add(set(wf, 'Config & Prompt', {
     company_name: 'Demo Solar & Roofing',
-    model: 'claude-opus-5',
-    effort: 'low',
+    ...PROVIDER_CONFIG,
     max_tokens: 8000,
     hot_threshold: 70,
     warm_threshold: 40,
@@ -306,26 +339,28 @@ function buildLeadQualification() {
     nurture_to_email: 'nurture-team@example.com',
     system_prompt: read('prompts/lead-scoring-system.txt').trim(),
   }, [720, 300]));
-  const build = wf.add(code('Build Claude Request', 'code-nodes/lead-qualification/build-claude-request.js', 'runOnceForEachItem', [960, 300]));
-  const claude = wf.add(claudeRequest('Claude: Score Lead', [1200, 300]));
-  const parse = wf.add(code('Parse Score', 'code-nodes/lead-qualification/parse-score.js', 'runOnceForEachItem', [1440, 300]));
+  const build = wf.add(code('Build LLM Request', 'code-nodes/lead-qualification/build-llm-request.js', 'runOnceForEachItem', [960, 300]));
+  const useGemini = wf.add(ifNode(wf, 'Use Gemini?', [['={{ $json.llm_provider }}', 'equals', 'gemini']], 'and', [1200, 300]));
+  const gemini = wf.add(geminiRequest('Gemini: Score Lead', [1440, 160]));
+  const claude = wf.add(claudeRequest('Claude: Score Lead', [1440, 440]));
+  const parse = wf.add(code('Parse Score', 'code-nodes/lead-qualification/parse-score.js', 'runOnceForEachItem', [1680, 300]));
 
   const leadColumns = [
     'timestamp', 'name', 'phone', 'email', 'address', 'monthly_electric_bill', 'roof_age_years',
     'homeowner', 'notes', 'score', 'tier', 'reason', 'suggested_opener', 'scoring_status', 'model', 'execution_id',
   ].map((c) => [c, `={{ $json.${c} }}`]);
-  const log = wf.add(sheetsAppend('Log Lead to Sheet', 'Leads', leadColumns, [1680, 300]));
+  const log = wf.add(sheetsAppend('Log Lead to Sheet', 'Leads', leadColumns, [1920, 300]));
 
   const reply = wf.add(respond(
     'Respond with Score',
     `={{ JSON.stringify({ score: ${P('score')}, tier: ${P('tier')}, reason: ${P('reason')}, suggested_opener: ${P('suggested_opener')}, scoring_status: ${P('scoring_status')} }) }}`,
     200,
-    [1920, 300],
+    [2160, 300],
   ));
   const isHot = wf.add(ifNode(wf, 'Hot or Needs Review?', [
     [`={{ ${P('tier')} }}`, 'equals', 'hot'],
     [`={{ ${P('scoring_status')} }}`, 'equals', 'failed'],
-  ], 'or', [2160, 300]));
+  ], 'or', [2400, 300]));
 
   const leadDetails = [
     `Name: {{ ${P('name')} }}`,
@@ -349,28 +384,31 @@ function buildLeadQualification() {
     to: `={{ ${C('alert_to_email')} }}`,
     subject: `={{ ${P('scoring_status')} === 'failed' ? 'LEAD NEEDS MANUAL SCORING' : 'HOT LEAD (score ' + ${P('score')} + ')' }}: {{ ${P('name')} }}`,
     text: [
-      `={{ ${P('scoring_status')} === 'failed' ? 'Claude could not score this lead. Call now and qualify manually.' : 'Call this lead now.' }}`,
+      `={{ ${P('scoring_status')} === 'failed' ? 'The AI could not score this lead. Call now and qualify manually.' : 'Call this lead now.' }}`,
       '',
       ...leadDetails,
     ].join('\n'),
-  }, [2400, 140]));
+  }, [2640, 140]));
 
   const nurture = wf.add(set(wf, 'Nurture Plan', {
     cadence: `={{ ${P('tier')} === 'warm' ? 'Warm: call back within 24 hours, then two more attempts over 7 days.' : 'Cold: add to the monthly email drip and re-score if they re-engage.' }}`,
-  }, [2400, 460]));
+  }, [2640, 460]));
   const nurtureEmail = wf.add(email('Email: Nurture Queue', {
     from: `={{ ${C('from_email')} }}`,
     to: `={{ ${C('nurture_to_email')} }}`,
     subject: `={{ ${P('tier')}.toUpperCase() }} lead (score {{ ${P('score')} }}): {{ ${P('name')} }}`,
     text: ['=Cadence: {{ $json.cadence }}', '', ...leadDetails].join('\n'),
-  }, [2640, 460]));
+  }, [2880, 460]));
 
   wf.connect(hook, validate);
   wf.connect(validate, isValid);
   wf.connect(isValid, config, 0);
   wf.connect(isValid, invalid, 1);
   wf.connect(config, build);
-  wf.connect(build, claude);
+  wf.connect(build, useGemini);
+  wf.connect(useGemini, gemini, 0);
+  wf.connect(useGemini, claude, 1);
+  wf.connect(gemini, parse);
   wf.connect(claude, parse);
   wf.connect(parse, log);
   wf.connect(log, reply);
@@ -391,18 +429,18 @@ function buildMissedCallFollowup() {
 
   wf.add(sticky(wf, 'Note: Overview', [
     '## Missed Call SMS Follow-up',
-    'The dialer POSTs a missed call. We wait 2 minutes (the homeowner often calls straight back), Claude drafts a compliant SMS, it is sent and logged, and after 1 hour one follow-up goes out unless the contact replied or opted out.',
+    'The dialer POSTs a missed call. We wait 2 minutes (the homeowner often calls straight back), an LLM drafts a compliant SMS (Claude by default, Gemini optional), it is sent and logged, and after 1 hour one follow-up goes out unless the contact replied or opted out.',
     '',
     '**Before activating**',
-    '1. Credentials: `Anthropic account`, `SMTP account`, `Google Sheets account`',
+    '1. Credentials: `Anthropic account` (or `Gemini API key`), `SMTP account`, `Google Sheets account`',
     '2. Paste your spreadsheet ID into **Log SMS Attempt** and **Read Reply Flag**',
-    '3. Set company, callback number and emails in **Config & Prompt**',
+    '3. Set provider, company, callback number and emails in **Config & Prompt**',
   ].join('\n'), [-60, -240], 1000, 380, 7));
 
   wf.add(sticky(wf, 'Note: Draft and enforce', [
     '### Draft, then enforce in code',
-    'Claude writes the text. **Enforce SMS Rules** guarantees it: 160 GSM-7 chars, no emojis, company named, exact opt-out line. If the draft cannot be fixed, a fixed template is sent instead.',
-  ].join('\n'), [1400, -240], 700, 380, 5));
+    '`llm_provider` in **Config & Prompt** picks Claude (default) or Gemini. The LLM writes the text; **Enforce SMS Rules** guarantees it: 160 GSM-7 chars, no emojis, company named, exact opt-out line. If the draft cannot be fixed, a fixed template is sent instead.',
+  ].join('\n'), [1400, -240], 940, 380, 5));
 
   wf.add(sticky(wf, 'Note: SMS provider slot', [
     '## SMS PROVIDER SLOTS IN HERE',
@@ -411,13 +449,13 @@ function buildMissedCallFollowup() {
     '- Message: `{{ $json.sms_text }}`',
     '',
     'Then delete **Email: SMS Preview** and connect the SMS node to **Log SMS Attempt**.',
-  ].join('\n'), [2120, -240], 520, 380, 3));
+  ].join('\n'), [2360, -240], 520, 380, 3));
 
   wf.add(sticky(wf, 'Note: Follow-up loop', [
     '### One follow-up after 1 hour',
     'Reads every SMS Log row for this phone. A rep (or a future inbound-SMS workflow) sets `replied` or `opted_out` to TRUE on the row.',
     '`opted_out` blocks all future texts to that number. If neither is set, the loop sends attempt 2 through the same draft and enforce nodes. `max_attempts` in **Config & Prompt** caps it.',
-  ].join('\n'), [2120, 860], 900, 300, 4));
+  ].join('\n'), [2360, 940], 900, 300, 4));
 
   const hook = wf.add(webhook(wf, 'Webhook: Missed Call', 'missed-call', [0, 300]));
   const validate = wf.add(code('Validate Missed Call', 'code-nodes/missed-call-followup/validate-missed-call.js', 'runOnceForEachItem', [240, 300]));
@@ -440,8 +478,7 @@ function buildMissedCallFollowup() {
     opt_out_line: 'Reply STOP to opt out.',
     max_sms_chars: 160,
     max_attempts: 2,
-    model: 'claude-opus-5',
-    effort: 'low',
+    ...PROVIDER_CONFIG,
     max_tokens: 4000,
     from_email: 'automations@example.com',
     sms_preview_to_email: 'sms-preview@example.com',
@@ -451,9 +488,11 @@ function buildMissedCallFollowup() {
   }, [960, 300]));
   const wait2m = wf.add(wait(wf, 'Wait 2 Minutes', 2, 'minutes', [1200, 300]));
   const build = wf.add(code('Build SMS Request', 'code-nodes/missed-call-followup/build-sms-request.js', 'runOnceForEachItem', [1440, 300]));
-  const claude = wf.add(claudeRequest('Claude: Draft SMS', [1680, 300]));
-  const enforce = wf.add(code('Enforce SMS Rules', 'code-nodes/missed-call-followup/enforce-sms-rules.js', 'runOnceForEachItem', [1920, 300]));
-  const provider = wf.add(noOp('SMS Provider (placeholder)', [2160, 300], 'PLACEHOLDER: replace with your SMS provider node'));
+  const useGemini = wf.add(ifNode(wf, 'Use Gemini?', [['={{ $json.llm_provider }}', 'equals', 'gemini']], 'and', [1680, 300]));
+  const gemini = wf.add(geminiRequest('Gemini: Draft SMS', [1920, 160]));
+  const claude = wf.add(claudeRequest('Claude: Draft SMS', [1920, 440]));
+  const enforce = wf.add(code('Enforce SMS Rules', 'code-nodes/missed-call-followup/enforce-sms-rules.js', 'runOnceForEachItem', [2160, 300]));
+  const provider = wf.add(noOp('SMS Provider (placeholder)', [2400, 300], 'PLACEHOLDER: replace with your SMS provider node'));
   const preview = wf.add(email('Email: SMS Preview', {
     from: `={{ ${C('from_email')} }}`,
     to: `={{ ${C('sms_preview_to_email')} }}`,
@@ -470,7 +509,7 @@ function buildMissedCallFollowup() {
       `Campaign: {{ ${E('campaign')} }}`,
       `Follow-up ID: {{ ${E('followup_id')} }}`,
     ].join('\n'),
-  }, [2400, 300]));
+  }, [2640, 300]));
 
   const logColumns = [
     ['timestamp', `={{ ${E('drafted_at')} }}`],
@@ -487,16 +526,16 @@ function buildMissedCallFollowup() {
     ['replied', ''],
     ['opted_out', ''],
   ];
-  const log = wf.add(sheetsAppend('Log SMS Attempt', 'SMS Log', logColumns, [2640, 300]));
+  const log = wf.add(sheetsAppend('Log SMS Attempt', 'SMS Log', logColumns, [2880, 300]));
   const more = wf.add(ifNode(wf, 'More Attempts Allowed?', [
     [`={{ ${E('attempt')} }}`, 'lessThan', `={{ ${C('max_attempts')} }}`],
-  ], 'and', [2880, 300]));
-  const doneMax = wf.add(noOp('Done: Max Attempts Reached', [3120, 460]));
-  const wait1h = wf.add(wait(wf, 'Wait 1 Hour', 1, 'hours', [2880, 620]));
-  const lookup = wf.add(sheetsLookup('Read Reply Flag', 'SMS Log', 'phone', `={{ ${E('phone')} }}`, [2640, 620]));
-  const check = wf.add(code('Check Reply Flag', 'code-nodes/missed-call-followup/check-reply-flag.js', 'runOnceForAllItems', [2400, 620]));
-  const sendAgain = wf.add(ifNode(wf, 'Send Follow-up?', [['={{ $json.send_followup }}', 'isTrue']], 'and', [2160, 620]));
-  const doneReplied = wf.add(noOp('Done: Replied or Opted Out', [1920, 800]));
+  ], 'and', [3120, 300]));
+  const doneMax = wf.add(noOp('Done: Max Attempts Reached', [3360, 460]));
+  const wait1h = wf.add(wait(wf, 'Wait 1 Hour', 1, 'hours', [3120, 700]));
+  const lookup = wf.add(sheetsLookup('Read Reply Flag', 'SMS Log', 'phone', `={{ ${E('phone')} }}`, [2880, 700]));
+  const check = wf.add(code('Check Reply Flag', 'code-nodes/missed-call-followup/check-reply-flag.js', 'runOnceForAllItems', [2640, 700]));
+  const sendAgain = wf.add(ifNode(wf, 'Send Follow-up?', [['={{ $json.send_followup }}', 'isTrue']], 'and', [2400, 700]));
+  const doneReplied = wf.add(noOp('Done: Replied or Opted Out', [2160, 880]));
 
   wf.connect(hook, validate);
   wf.connect(validate, isValid);
@@ -505,7 +544,10 @@ function buildMissedCallFollowup() {
   wf.connect(accepted, config);
   wf.connect(config, wait2m);
   wf.connect(wait2m, build);
-  wf.connect(build, claude);
+  wf.connect(build, useGemini);
+  wf.connect(useGemini, gemini, 0);
+  wf.connect(useGemini, claude, 1);
+  wf.connect(gemini, enforce);
   wf.connect(claude, enforce);
   wf.connect(enforce, provider);
   wf.connect(provider, preview);
