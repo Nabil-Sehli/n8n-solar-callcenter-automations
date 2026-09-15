@@ -365,12 +365,6 @@
           "timeout": 120000
         }
       },
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": null,
-          "name": "Gemini API key"
-        }
-      },
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 5000,
@@ -408,12 +402,6 @@
         "jsonBody": "={{ JSON.stringify($json.llm_request) }}",
         "options": {
           "timeout": 120000
-        }
-      },
-      "credentials": {
-        "anthropicApi": {
-          "id": null,
-          "name": "Anthropic account"
         }
       },
       "retryOnFail": true,

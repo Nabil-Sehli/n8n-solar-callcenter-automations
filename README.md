@@ -113,7 +113,7 @@ flowchart LR
 | **Wait 2 Minutes** | Wait 1.1 | Homeowners often call straight back after a missed call. Texting instantly feels robotic and can cross a callback. Waits over 65s are saved to the database, so no memory is held and it survives a restart. |
 | **Build SMS Request** | Code 2 (each item) | Runs for attempt 1 and again for attempt 2 (loop). Sends only first name, service label, callback number and attempt. **No phone number, no campaign code, no timestamp** (the model can't know the contact's time zone, so it can't say "at 2pm"). |
 | **Use Gemini?** | IF 2.3 | Same provider switch as workflow 1. |
-| **Claude: Draft SMS** / **Gemini: Draft SMS** | HTTP Request 4.5 | Same configuration as workflow 1: credential by name, retries, continue on error. Gemini output is plain text (no JSON mode). |
+| **Claude: Draft SMS** / **Gemini: Draft SMS** | HTTP Request 4.5 | Same configuration as workflow 1: no shipped credential, retries, continue on error. Gemini output is plain text (no JSON mode). |
 | **Enforce SMS Rules** | Code 2 (each item) | **The prompt asks for compliance; this node guarantees it**, whichever provider wrote the draft (details below). |
 | **SMS Provider (placeholder)** | No Operation | **Where Twilio / Telnyx / Vonage goes.** Marked with a red sticky note and an on-canvas note. It passes data through unchanged, so swapping it in changes nothing else. |
 | **Email: SMS Preview** | Send Email 2.1 | "Send as email for now": shows exactly what would be texted, its length, and what was auto-fixed. Reads fields from **Enforce SMS Rules** by name, so it still works after the placeholder is replaced. |
@@ -138,7 +138,7 @@ flowchart LR
 
 **Prerequisite:** built and tested against **n8n 2.38.7**. Check your version under *Settings → About n8n*. Older 1.x instances may not have IF 2.3, Set 3.5, Google Sheets 4.7 or Respond to Webhook 1.5 (see [Verify on import](#verify-on-import)).
 
-1. **Create the credentials** with these exact names **before** importing. Nodes reference credentials by name with `"id": null`, and n8n links each one to the credential of that type and name on import.
+1. **Create the credentials** with these names **before** importing. The Email and Sheets nodes reference credentials by name with `"id": null`, and n8n links each one to the credential of that type and name on import. The LLM nodes ship with no credential, so you select one yourself in step 5.
    | Name | Type | Needed when |
    |---|---|---|
    | `Anthropic account` | Anthropic | `llm_provider` is `anthropic` (default) |
@@ -146,7 +146,7 @@ flowchart LR
    | `SMTP account` | SMTP (for Gmail use `smtp.gmail.com`, port 465, SSL, an app password) | always |
    | `Google Sheets account` | Google Sheets OAuth2 API | always |
 
-   You only need the LLM credential for the provider you use. The other LLM node stays unlinked and never runs.
+   You only need the LLM credential for the provider you use. n8n checks the credentials of **every** node when a run starts, even nodes on a branch that never runs. A credential reference that can't be linked fails the whole run with *uses invalid credential*. That's why neither LLM node references a credential until you pick one.
 2. **Create a Google Sheet** with two tabs and paste the header rows:
    - `Leads`: header row from [`sheets/Leads.csv`](sheets/Leads.csv)
    - `SMS Log`: header row from [`sheets/SMS Log.csv`](sheets/SMS%20Log.csv)
@@ -156,8 +156,9 @@ flowchart LR
    docker exec n8n n8n import:workflow --separate --input=/tmp/workflows
    ```
 4. **Paste your spreadsheet ID** (the long id in the Sheet URL) into **Log Lead to Sheet**, **Log SMS Attempt** and **Read Reply Flag**, replacing `REPLACE_WITH_YOUR_SPREADSHEET_ID`.
-5. **Edit `Config & Prompt`** in each workflow: company name, callback number, recipient emails.
-6. **Publish** each workflow to enable its production webhook URL.
+5. **Select the LLM credential** for your provider: open **Claude: Score Lead** / **Claude: Draft SMS** and pick `Anthropic account`, or **Gemini: Score Lead** / **Gemini: Draft SMS** and pick `Gemini API key`. Leave the other provider's nodes without a credential.
+6. **Edit `Config & Prompt`** in each workflow: company name, callback number, recipient emails.
+7. **Publish** each workflow to enable its production webhook URL.
 
 ## Switching the LLM provider
 
@@ -172,7 +173,7 @@ Both workflows read the same fields in **Config & Prompt**:
 | `gemini_thinking_level` | `low` | `generationConfig.thinkingConfig.thinkingLevel` |
 | `max_tokens` | 8000 / 4000 | Sent as `max_tokens` or `maxOutputTokens`. **Both providers count thinking tokens against it**, so keep it generous. |
 
-To switch, set `llm_provider` to `gemini` in **Config & Prompt**, create the `Gemini API key` credential, and open **Gemini: Score Lead** / **Gemini: Draft SMS** once to confirm the credential is selected.
+To switch, set `llm_provider` to `gemini` in **Config & Prompt**, create the `Gemini API key` credential, and select it in **Gemini: Score Lead** / **Gemini: Draft SMS**. If you had already selected `Anthropic account` in the **Claude:** nodes, you can leave it; a linked credential that never runs doesn't block anything.
 
 **What stays the same:** the system prompts (`prompts/*.txt`), the lead data sent, the JSON output contract (`score`, `tier`, `reason`, `suggested_opener`), the parser, the SMS enforcement and every downstream node.
 
@@ -226,13 +227,14 @@ On Windows PowerShell, call `curl.exe` explicitly (plain `curl` is an alias for 
 npm run check   # rebuild JSON, validate it, run 43 unit tests (Node 20+, no dependencies)
 ```
 
-- `scripts/validate-workflows.mjs` checks the required top-level keys, the workflow id (the CLI import fails without one), unique UUID node ids and names, node type/typeVersion against n8n 2.38.7, webhookIds, no overlapping nodes, no unconnected nodes, name-only credentials, **every `$('Node Name')` reference pointing at a real node** (catches renames), and secret patterns.
+- `scripts/validate-workflows.mjs` checks the required top-level keys, the workflow id (the CLI import fails without one), unique UUID node ids and names, node type/typeVersion against n8n 2.38.7, webhookIds, no overlapping nodes, no unconnected nodes, name-only credentials, no credentials on the LLM request nodes, **every `$('Node Name')` reference pointing at a real node** (catches renames), and secret patterns.
 - `test/code-nodes.test.mjs` runs the JavaScript **from the built workflow JSON** against both providers' response shapes: fences, thinking blocks and thought parts, prose-wrapped JSON, refusals and blocks, HTTP errors, truncation, renter caps, emojis, smart quotes, over-length drafts, long names and reply/opt-out flags.
 
 ### What was verified end to end
 
 Before publishing, both workflows were run in a throwaway `n8nio/n8n:2.38.7` container:
-- The shipped JSON imported through the CLI, and all three name-only credentials were auto-linked.
+- The shipped JSON imported through the CLI, and the name-only credentials were auto-linked.
+- On a real n8n 2.38.7 instance with only a Gemini key, the earlier build (both LLM nodes referencing a credential by name) failed every run with *Node "Claude: Score Lead" uses invalid credential*. After removing the LLM credential references and selecting `Gemini API key` in the Gemini nodes, the samples ran against real Gemini: hot 98 / `hot`, renter 5 / `cold`, invalid 400.
 - Copies were published, with the Anthropic URL pointed at a local mock API, SMTP at Mailpit, Waits shortened (the 2-minute wait was kept above 65s so the database-saved wait path ran), and the three Google Sheets nodes replaced by pass-through Code nodes (no Google account offline).
 
 23/23 checks passed:
@@ -255,7 +257,7 @@ These are the parts that could **not** be proven offline:
    - **Read Reply Flag**'s filter column shows `phone`
 3. **`fallbacks: "default"` and the `anthropic-beta: server-side-fallback-2026-07-01` header were only exercised against the mock.** If the real API returns a 400 about `fallbacks`, the parser marks leads `failed` with that message. Then delete `fallbacks: 'default'` in **Build Claude Request** / **Build SMS Request** and the `anthropic-beta` header in both **Claude:** nodes.
 4. **Real model output quality.** The mock proved the plumbing, not the scoring. Run the samples with your real key and read the scores, reasons and SMS drafts.
-5. **Credential auto-linking** only happens when exactly one credential of that type has that exact name. Otherwise open each **Claude:**, **Email:** and **Sheets** node and select the credential.
+5. **Credential auto-linking** only happens when exactly one credential of that type has that exact name. Otherwise open each **Email:** and **Sheets** node and select the credential. The **Claude:** / **Gemini:** nodes always need a manual pick (import step 5).
 6. **Anthropic credential in HTTP Request.** Confirmed from the n8n source (the credential picker accepts any type with `authenticate`) and in the e2e run, but if your instance doesn't list *Anthropic* under *Predefined Credential Type*, switch to *Generic Credential Type → Header Auth* with header `x-api-key`.
 7. **Gemini request details.** The endpoint, `x-goog-api-key` header, `thinkingConfig.thinkingLevel` and `responseMimeType` follow Google's current docs, and parsing of thought parts and `finishReason` is unit-tested. Google's pages disagree on whether REST wants `low` or `LOW`, so if Gemini returns a 400 mentioning `thinkingLevel`, change `gemini_thinking_level` to `LOW`.
 

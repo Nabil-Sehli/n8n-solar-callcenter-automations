@@ -58,6 +58,11 @@ for (const file of readdirSync(dir).filter((f) => f.endsWith('.json'))) {
     if (!Array.isArray(n.position) || n.position.length !== 2) errors.push(`node "${n.name}" has no position`);
     if (NEEDS_WEBHOOK_ID.has(n.type) && !UUID.test(n.webhookId ?? '')) errors.push(`node "${n.name}" needs a webhookId`);
 
+    // n8n validates every node's credentials at run start, so an unlinked
+    // reference on the unused provider's LLM node would block every run.
+    if (n.type === 'n8n-nodes-base.httpRequest' && n.credentials) {
+      errors.push(`node "${n.name}" is an LLM request and must ship without credentials`);
+    }
     for (const [type, cred] of Object.entries(n.credentials ?? {})) {
       const keys = Object.keys(cred).sort().join(',');
       if (keys !== 'id,name' || cred.id !== null || !cred.name) {

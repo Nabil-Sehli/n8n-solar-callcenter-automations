@@ -28,11 +28,13 @@ const workflowId = (slug) => {
 
 // Credentials are referenced by name with id null. On import n8n looks up a
 // credential of that type and name and links it (replaceInvalidCredentials).
+//
+// The LLM nodes carry no credential reference at all. n8n checks every node's
+// credentials when a run starts, including nodes on branches that never
+// execute, and fails the run with "uses invalid credential" if an entry was
+// left unlinked. With both providers referenced, whichever key you didn't
+// create would block every run.
 const CREDENTIALS = {
-  anthropic: { anthropicApi: { id: null, name: 'Anthropic account' } },
-  // Generic Header Auth (x-goog-api-key). n8n's built-in Gemini credential
-  // sends the key as a ?key= URL query parameter, which can leak into logs.
-  gemini: { httpHeaderAuth: { id: null, name: 'Gemini API key' } },
   smtp: { smtp: { id: null, name: 'SMTP account' } },
   sheets: { googleSheetsOAuth2Api: { id: null, name: 'Google Sheets account' } },
 };
@@ -147,13 +149,14 @@ const claudeRequest = (name, position) => ({
     jsonBody: '={{ JSON.stringify($json.llm_request) }}',
     options: { timeout: 120000 },
   },
-  credentials: CREDENTIALS.anthropic,
   retryOnFail: true,
   maxTries: 3,
   waitBetweenTries: 5000,
   onError: 'continueRegularOutput',
 });
 
+// Generic Header Auth (x-goog-api-key). n8n's built-in Gemini credential
+// sends the key as a ?key= URL query parameter, which can leak into logs.
 const geminiRequest = (name, position) => ({
   name,
   type: 'n8n-nodes-base.httpRequest',
@@ -169,7 +172,6 @@ const geminiRequest = (name, position) => ({
     jsonBody: '={{ JSON.stringify($json.llm_request) }}',
     options: { timeout: 120000 },
   },
-  credentials: CREDENTIALS.gemini,
   retryOnFail: true,
   maxTries: 3,
   waitBetweenTries: 5000,
