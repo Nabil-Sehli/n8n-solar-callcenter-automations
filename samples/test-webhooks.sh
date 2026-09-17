@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
 # Sends every sample payload to the production webhook URLs.
 # Publish both workflows first. Override the host with N8N_URL=...
+# If a proxy in front of n8n requires a shared secret, set WEBHOOK_SECRET=...
+# (sent as the X-Webhook-Secret header).
 #
 #   bash samples/test-webhooks.sh
 set -euo pipefail
 
 N8N_URL="${N8N_URL:-http://localhost:5678}"
+AUTH=()
+if [ -n "${WEBHOOK_SECRET:-}" ]; then AUTH=(-H "X-Webhook-Secret: $WEBHOOK_SECRET"); fi
 cd "$(dirname "$0")"
 
 post() {
   echo
   echo "=== $1 -> $2"
   curl -s -w "\nHTTP %{http_code}\n" -X POST "$N8N_URL/webhook/$1" \
-    -H "Content-Type: application/json" --data @"$2"
+    -H "Content-Type: application/json" ${AUTH[@]+"${AUTH[@]}"} --data @"$2"
 }
 
 # Workflow 1: AI lead qualification
