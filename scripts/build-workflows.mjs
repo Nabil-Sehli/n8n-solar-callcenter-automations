@@ -579,8 +579,13 @@ function buildMissedCallFollowup() {
   const sendAgain = wf.add(ifNode(wf, 'Send Follow-up?', [['={{ $json.send_followup }}', 'isTrue']], 'and', [2400, 700]));
   const doneReplied = wf.add(noOp('Done: Replied or Opted Out', [2160, 880]));
 
-  const telemetry = wf.add(code('Telemetry: Report Attempt', 'code-nodes/missed-call-followup/build-telemetry.js', 'runOnceForAllItems', [3360, 700]));
-  const postTelemetry = wf.add(telemetryRequest('Telemetry: Post Attempt', [3600, 700]));
+  // Above "More Attempts Allowed?" on purpose. executionOrder v1 runs sibling
+  // branches by node position, top to bottom - not by connection order - and
+  // the other branch runs into "Wait 1 Hour", which suspends the whole
+  // execution and saves every branch that has not run yet along with it.
+  // Placed below, this attempt's tokens are not reported for an hour.
+  const telemetry = wf.add(code('Telemetry: Report Attempt', 'code-nodes/missed-call-followup/build-telemetry.js', 'runOnceForAllItems', [3120, 60]));
+  const postTelemetry = wf.add(telemetryRequest('Telemetry: Post Attempt', [3360, 60]));
 
   wf.connect(hook, validate);
   wf.connect(validate, isValid);
@@ -597,10 +602,8 @@ function buildMissedCallFollowup() {
   wf.connect(enforce, provider);
   wf.connect(provider, preview);
   wf.connect(preview, log);
-  // Telemetry first, and the order matters: the other branch runs into
-  // "Wait 1 Hour", and a Wait node suspends the whole execution, queueing
-  // every sibling branch behind it. Connected the other way round, attempt
-  // 1's tokens and latency would not be reported until an hour later.
+  // See the position comment above: this branch has to run before the one
+  // that reaches Wait 1 Hour.
   wf.connect(log, telemetry);
   wf.connect(telemetry, postTelemetry);
   wf.connect(log, more);

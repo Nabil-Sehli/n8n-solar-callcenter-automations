@@ -308,6 +308,12 @@ Three details that are easy to get wrong:
 - **The follow-up workflow puts the attempt number in `run_id`.** Attempt 2 runs an hour later
   inside the *same* n8n execution, so without it a collector that dedupes by run id would treat the
   second attempt as a retry and drop its tokens and cost on the floor.
+- **The telemetry node sits above the branch it shares a parent with.** `executionOrder: v1` runs
+  sibling branches by node *position*, top to bottom - not by connection order - and the other
+  branch runs into `Wait 1 Hour`. A Wait node suspends the whole execution and saves every branch
+  that hasn't run along with it, so a telemetry node placed lower on the canvas reports the
+  attempt an hour late. In the saved execution that is indistinguishable from "ran and returned
+  nothing" until you look at `nodeExecutionStack`.
 
 After importing, link a **Header Auth** credential (a token header your collector expects) on the
 `Telemetry: Post ...` node. Like the LLM nodes, it ships without a credential reference on purpose:

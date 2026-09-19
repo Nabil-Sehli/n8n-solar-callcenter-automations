@@ -806,8 +806,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3360,
-        700
+        3120,
+        60
       ],
       "parameters": {
         "mode": "runOnceForAllItems",
@@ -820,8 +820,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        3600,
-        700
+        3360,
+        60
       ],
       "parameters": {
         "method": "POST",
