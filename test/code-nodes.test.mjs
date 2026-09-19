@@ -269,6 +269,70 @@ describe('ai-lead-qualification', () => {
       assert.ok(!Number.isNaN(Date.parse(json.timestamp)));
     });
   });
+
+  describe('Telemetry: Report Run', () => {
+    const on = { ...cfg, telemetry_url: 'http://llmobs:9109/v1/events' };
+    const t0 = Date.now() - 2000;
+    const report = (parsed, { config = on, provider = 'gemini', raw = geminiText('{}') } = {}) =>
+      runCode(wf, 'Telemetry: Report Run', {
+        nodes: {
+          'Config & Prompt': config,
+          'Validate Lead': { ...goodLead, t_start: t0 },
+          'Build LLM Request': { llm_provider: provider, llm_model: 'gemini-3.5-flash', t_llm_start: t0 + 100 },
+          'Parse Score': parsed,
+          'Gemini: Score Lead': raw,
+          'Claude: Score Lead': raw,
+        },
+      });
+    const scored = { scoring_status: 'ok', score: 95, tier: 'hot', model: 'gemini-3.5-flash-lite', t_parsed: t0 + 1800 };
+
+    it('emits nothing when no collector is configured', async () => {
+      assert.deepEqual(await report(scored, { config: cfg }), []);
+    });
+
+    it('reports a scored lead as a successful run', async () => {
+      const [{ json }] = await report(scored);
+      assert.equal(json.telemetry_url, on.telemetry_url);
+      assert.equal(json.event.workflow, 'AI Lead Qualification');
+      assert.equal(json.event.status, 'ok');
+      assert.equal(json.event.run_id, 'n8n-1234');
+      assert.ok(json.event.duration_ms >= 2000);
+      assert.deepEqual(json.event.attrs, { tier: 'hot', score: 95, scoring_status: 'ok' });
+    });
+
+    it('bills Gemini thinking tokens as output', async () => {
+      const [{ json }] = await report(scored);
+      const step = json.event.steps.find((s) => s.node === 'Gemini: Score Lead');
+      assert.equal(step.tokens_in, 10);
+      assert.equal(step.tokens_out, 15); // 10 candidates + 5 thoughts
+      assert.equal(step.model, 'gemini-3.5-flash-lite');
+      assert.equal(step.duration_ms, 1700);
+    });
+
+    it('reads Anthropic usage', async () => {
+      const raw = claudeText('{}', { usage: { input_tokens: 700, output_tokens: 120 } });
+      const [{ json }] = await report(scored, { provider: 'anthropic', raw });
+      const step = json.event.steps.find((s) => s.node === 'Claude: Score Lead');
+      assert.equal(step.tokens_in, 700);
+      assert.equal(step.tokens_out, 120);
+    });
+
+    // The lead reached a human and the tokens were spent: not a success, but
+    // not a broken pipeline either.
+    it('reports an unscorable lead as partial and names the node', async () => {
+      const failed = { ...scored, scoring_status: 'failed', score: null, tier: null, reason: 'Auto-scoring failed: 503.' };
+      const [{ json }] = await report(failed);
+      assert.equal(json.event.status, 'partial');
+      assert.equal(json.event.failed_node, 'Gemini: Score Lead');
+      assert.match(json.event.error, /503/);
+      assert.equal(json.event.steps.find((s) => s.node === 'Gemini: Score Lead').status, 'failed');
+    });
+
+    it('passes the provider status code through when the call errored', async () => {
+      const [{ json }] = await report(scored, { raw: { error: { code: 503, message: 'overloaded' } } });
+      assert.equal(json.event.steps.find((s) => s.node === 'Gemini: Score Lead').http_status, 503);
+    });
+  });
 });
 
 // ---------------- Workflow 2 ----------------
@@ -470,6 +534,60 @@ describe('missed-call-followup', () => {
     it('stops after max_attempts', async () => {
       const r = await check([{}], cfg.max_attempts);
       assert.equal(r.send_followup, false);
+    });
+  });
+
+  describe('Telemetry: Report Attempt', () => {
+    const on = { ...cfg, telemetry_url: 'http://llmobs:9109/v1/events' };
+    const t0 = Date.now() - 5000;
+    const report = (enforced, { config = on, raw = geminiText('{}') } = {}) =>
+      runCode(wf, 'Telemetry: Report Attempt', {
+        nodes: {
+          'Config & Prompt': config,
+          'Validate Missed Call': { t_start: t0 },
+          'Enforce SMS Rules': enforced,
+          'Gemini: Draft SMS': raw,
+          'Claude: Draft SMS': raw,
+        },
+      });
+    const drafted = {
+      attempt: 1, llm_provider: 'gemini', llm_model: 'gemini-3.5-flash', sms_source: 'llm',
+      sms_issues: '', sms_length: 142, campaign: 'solar-az',
+      t_llm_start: t0 + 500, t_enforced: t0 + 2300,
+    };
+
+    it('emits nothing when no collector is configured', async () => {
+      assert.deepEqual(await report(drafted, { config: cfg }), []);
+    });
+
+    // Both attempts share one n8n execution id. Without the attempt in the run
+    // id the collector would take the second for a retry of the first and drop
+    // it, losing a whole LLM call's tokens and cost.
+    it('gives each attempt its own run id', async () => {
+      const [first] = await report(drafted);
+      const [second] = await report({ ...drafted, attempt: 2 });
+      assert.equal(first.json.event.run_id, 'n8n-1234-attempt-1');
+      assert.equal(second.json.event.run_id, 'n8n-1234-attempt-2');
+    });
+
+    it('measures the drafting work, not the hour of waiting', async () => {
+      const [{ json }] = await report(drafted);
+      assert.ok(json.event.duration_ms < 5000);
+      assert.equal(json.event.steps.find((s) => s.node === 'Gemini: Draft SMS').duration_ms, 1800);
+    });
+
+    it('reports a template fallback as partial', async () => {
+      const [{ json }] = await report({ ...drafted, sms_source: 'fallback_template', sms_issues: 'too long' });
+      assert.equal(json.event.status, 'partial');
+      assert.equal(json.event.failed_node, 'Gemini: Draft SMS');
+      assert.equal(json.event.attrs.sms_source, 'fallback_template');
+    });
+
+    it('counts tokens for a successful draft', async () => {
+      const [{ json }] = await report(drafted);
+      const step = json.event.steps.find((s) => s.node === 'Gemini: Draft SMS');
+      assert.equal(step.tokens_in, 10);
+      assert.equal(step.tokens_out, 15);
     });
   });
 });

@@ -32,6 +32,8 @@ const serviceInterest =
 
 return {
   json: {
+    // Start of the run, for the telemetry node. Epoch ms.
+    t_start: Date.now(),
     followup_id: `mc-${$execution.id}`,
     contact_name: contactName,
     first_name: firstName,

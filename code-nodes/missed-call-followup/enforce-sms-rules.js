@@ -118,6 +118,7 @@ return {
     sms_length: smsText.length,
     sms_source: source,
     sms_issues: issues.join('; '),
+    t_enforced: Date.now(),
     drafted_at: new Date().toISOString(),
   },
 };

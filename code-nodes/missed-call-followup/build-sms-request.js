@@ -65,5 +65,9 @@ return {
     llm_provider: provider,
     llm_model: provider === 'anthropic' ? cfg.anthropic_model : cfg.gemini_model,
     llm_request: request,
+    // Immediately before the model call. Attempt 2 passes through here again
+    // an hour later, which is why the telemetry node measures from this and
+    // not from the webhook.
+    t_llm_start: Date.now(),
   },
 };

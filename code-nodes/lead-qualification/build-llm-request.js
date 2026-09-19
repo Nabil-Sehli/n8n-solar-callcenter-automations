@@ -69,5 +69,8 @@ return {
     llm_provider: provider,
     llm_model: provider === 'anthropic' ? cfg.anthropic_model : cfg.gemini_model,
     llm_request: request,
+    // Taken immediately before the HTTP node runs, so the difference with
+    // t_parsed is the model call and nothing else.
+    t_llm_start: Date.now(),
   },
 };

@@ -178,6 +178,35 @@ const geminiRequest = (name, position) => ({
   onError: 'continueRegularOutput',
 });
 
+// Posts one observability event per run to a collector (see the ops-platform
+// repo). Fire-and-forget: the caller has already been answered by the time
+// this runs, so it retries twice and then gives up rather than turning a
+// telemetry blip into a failed execution.
+//
+// No credential is referenced, like the LLM nodes above and for the same
+// reason: n8n validates every node's credentials when a run starts. Link a
+// Header Auth credential after import, and set telemetry_url to switch it on.
+const telemetryRequest = (name, position) => ({
+  name,
+  type: 'n8n-nodes-base.httpRequest',
+  typeVersion: 4.5,
+  position,
+  parameters: {
+    method: 'POST',
+    url: '={{ $json.telemetry_url }}',
+    authentication: 'genericCredentialType',
+    genericAuthType: 'httpHeaderAuth',
+    sendBody: true,
+    specifyBody: 'json',
+    jsonBody: '={{ JSON.stringify($json.event) }}',
+    options: { timeout: 5000 },
+  },
+  retryOnFail: true,
+  maxTries: 2,
+  waitBetweenTries: 2000,
+  onError: 'continueRegularOutput',
+});
+
 // Shared config fields for the provider switch. Anthropic stays the default.
 const PROVIDER_CONFIG = {
   llm_provider: 'anthropic',
@@ -339,6 +368,9 @@ function buildLeadQualification() {
     from_email: 'automations@example.com',
     alert_to_email: 'closers@example.com',
     nurture_to_email: 'nurture-team@example.com',
+    // Empty = telemetry off. Point it at a collector to switch it on, e.g.
+    // http://llmobs:9109/v1/events
+    telemetry_url: '',
     system_prompt: read('prompts/lead-scoring-system.txt').trim(),
   }, [720, 300]));
   const build = wf.add(code('Build LLM Request', 'code-nodes/lead-qualification/build-llm-request.js', 'runOnceForEachItem', [960, 300]));
@@ -402,6 +434,9 @@ function buildLeadQualification() {
     text: ['=Cadence: {{ $json.cadence }}', '', ...leadDetails].join('\n'),
   }, [2880, 460]));
 
+  const telemetry = wf.add(code('Telemetry: Report Run', 'code-nodes/lead-qualification/build-telemetry.js', 'runOnceForAllItems', [2400, 700]));
+  const postTelemetry = wf.add(telemetryRequest('Telemetry: Post Run', [2640, 700]));
+
   wf.connect(hook, validate);
   wf.connect(validate, isValid);
   wf.connect(isValid, config, 0);
@@ -415,6 +450,10 @@ function buildLeadQualification() {
   wf.connect(parse, log);
   wf.connect(log, reply);
   wf.connect(reply, isHot);
+  // Second branch off the response: telemetry never sits between the caller
+  // and their answer.
+  wf.connect(reply, telemetry);
+  wf.connect(telemetry, postTelemetry);
   wf.connect(isHot, hotEmail, 0);
   wf.connect(isHot, nurture, 1);
   wf.connect(nurture, nurtureEmail);
@@ -484,6 +523,7 @@ function buildMissedCallFollowup() {
     max_tokens: 4000,
     from_email: 'automations@example.com',
     sms_preview_to_email: 'sms-preview@example.com',
+    telemetry_url: '',
     system_prompt: read('prompts/sms-followup-system.txt').trim(),
     attempt_1_guidance: 'First text. Friendly and brief: sorry we missed them, invite them to call or text back.',
     attempt_2_guidance: 'Final follow-up. The first text got no reply. Shorter than a first text, different wording, low pressure, and make it clear this is the last message for now.',
@@ -539,6 +579,9 @@ function buildMissedCallFollowup() {
   const sendAgain = wf.add(ifNode(wf, 'Send Follow-up?', [['={{ $json.send_followup }}', 'isTrue']], 'and', [2400, 700]));
   const doneReplied = wf.add(noOp('Done: Replied or Opted Out', [2160, 880]));
 
+  const telemetry = wf.add(code('Telemetry: Report Attempt', 'code-nodes/missed-call-followup/build-telemetry.js', 'runOnceForAllItems', [3360, 700]));
+  const postTelemetry = wf.add(telemetryRequest('Telemetry: Post Attempt', [3600, 700]));
+
   wf.connect(hook, validate);
   wf.connect(validate, isValid);
   wf.connect(isValid, accepted, 0);
@@ -555,6 +598,9 @@ function buildMissedCallFollowup() {
   wf.connect(provider, preview);
   wf.connect(preview, log);
   wf.connect(log, more);
+  // Inside the loop, so attempt 2 reports its own tokens an hour later.
+  wf.connect(log, telemetry);
+  wf.connect(telemetry, postTelemetry);
   wf.connect(more, wait1h, 0);
   wf.connect(more, doneMax, 1);
   wf.connect(wait1h, lookup);

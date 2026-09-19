@@ -263,6 +263,57 @@ These are the parts that could **not** be proven offline:
 
 ---
 
+## Telemetry (optional)
+
+Both workflows can report each run to an HTTP collector: which model answered, how many tokens it
+burned, how long the call took, and - when the model failed - which node to look at. It is off
+until you set `telemetry_url` in **Config & Prompt**.
+
+```
+Config & Prompt -> telemetry_url: http://llmobs:9109/v1/events
+```
+
+The event is built by a Code node (`Telemetry: Report Run` / `Telemetry: Report Attempt`) and
+posted by the HTTP node after it. Both sit **after** the caller has been answered and the row has
+been written, and the HTTP node continues on error, so telemetry can never delay a response or
+fail a lead.
+
+The receiving end I run is [`llmobs`](https://github.com/Nabil-Sehli/oracle-ops-platform), but the
+payload is plain JSON and any endpoint can take it:
+
+```json
+{
+  "run_id": "n8n-4711",
+  "workflow": "AI Lead Qualification",
+  "status": "ok",
+  "duration_ms": 2310,
+  "steps": [
+    { "node": "Validate Lead", "status": "ok" },
+    { "node": "Gemini: Score Lead", "status": "ok", "provider": "gemini",
+      "model": "gemini-3.5-flash-lite", "tokens_in": 812, "tokens_out": 96, "duration_ms": 1700 },
+    { "node": "Log Lead to Sheet", "status": "ok" }
+  ],
+  "attrs": { "tier": "hot", "score": 95, "scoring_status": "ok" }
+}
+```
+
+Three details that are easy to get wrong:
+
+- **Gemini bills thinking tokens as output** and reports them in a separate `thoughtsTokenCount`;
+  Anthropic already folds them into `output_tokens`. The builders normalize both to one number, so
+  a provider switch doesn't quietly change what "output tokens" means.
+- **A lead the model couldn't score is `partial`, not `failed`.** The pipeline worked: the lead was
+  logged, the caller was answered, a human was emailed. Only the model let go. Counting it as a
+  pipeline failure would hide real breakage behind API weather.
+- **The follow-up workflow puts the attempt number in `run_id`.** Attempt 2 runs an hour later
+  inside the *same* n8n execution, so without it a collector that dedupes by run id would treat the
+  second attempt as a retry and drop its tokens and cost on the floor.
+
+After importing, link a **Header Auth** credential (a token header your collector expects) on the
+`Telemetry: Post ...` node. Like the LLM nodes, it ships without a credential reference on purpose:
+n8n validates every node's credentials when a run starts, so a dangling reference would fail runs
+for anyone who never set up a collector.
+
 ## Design choices worth knowing
 
 - **Provider switch in config, not in code paths.** One field picks the LLM. The prompt, output contract and parser are shared, so switching providers changes cost and quality, not behavior.
@@ -275,7 +326,7 @@ These are the parts that could **not** be proven offline:
 ## What I'd add next
 
 1. **Webhook auth and idempotency.** Header auth on both webhooks (they're open now for easy testing and they spend API credits). Dedupe on `phone + missed_at` so a dialer retry doesn't text twice.
-2. **Error Workflow.** An *Error Trigger* workflow that emails or Slacks on any failed execution (for example SMTP or Sheets down after the webhook responded).
+2. **Error Workflow.** An *Error Trigger* workflow that reports any failed execution (for example SMTP or Sheets down after the webhook responded). The [ops-platform](https://github.com/Nabil-Sehli/oracle-ops-platform) repo has one that posts to the same collector as the telemetry above, so failures and successes land in one place.
 3. **Structured outputs.** Add `output_config.format` with a JSON schema so the API itself guarantees the score shape. Keep the parser as a second line of defense.
 4. **Texting compliance gates before the SMS provider goes live** (confirm specifics with counsel): documented consent for each number, a quiet-hours check in the recipient's local time (from area code or address), a DNC scrub, and 10DLC registration with the provider.
 5. **Inbound SMS workflow.** The provider's inbound webhook sets `replied` / `opted_out` in the Sheet automatically and handles STOP / HELP keywords, replacing manual flags.

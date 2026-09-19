@@ -62,6 +62,9 @@ const read = readLlmResponse(res);
 
 const base = {
   timestamp: new Date().toISOString(),
+  // Taken as soon as the response is in hand; t_llm_start to here is the
+  // model call, which is what the latency panels measure.
+  t_parsed: Date.now(),
   name: lead.name,
   phone: lead.phone,
   email: lead.email,

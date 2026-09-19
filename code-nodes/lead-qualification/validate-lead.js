@@ -50,6 +50,9 @@ if (lead.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(lead.email)) errors.push('e
 return {
   json: {
     ...lead,
+    // Start of the run, for the telemetry node at the end. Epoch ms, because
+    // it is subtracted, never displayed.
+    t_start: Date.now(),
     is_valid: errors.length === 0,
     validation_errors: errors,
   },
