@@ -597,10 +597,13 @@ function buildMissedCallFollowup() {
   wf.connect(enforce, provider);
   wf.connect(provider, preview);
   wf.connect(preview, log);
-  wf.connect(log, more);
-  // Inside the loop, so attempt 2 reports its own tokens an hour later.
+  // Telemetry first, and the order matters: the other branch runs into
+  // "Wait 1 Hour", and a Wait node suspends the whole execution, queueing
+  // every sibling branch behind it. Connected the other way round, attempt
+  // 1's tokens and latency would not be reported until an hour later.
   wf.connect(log, telemetry);
   wf.connect(telemetry, postTelemetry);
+  wf.connect(log, more);
   wf.connect(more, wait1h, 0);
   wf.connect(more, doneMax, 1);
   wf.connect(wait1h, lookup);

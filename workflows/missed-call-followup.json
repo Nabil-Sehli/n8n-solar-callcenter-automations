@@ -1003,12 +1003,12 @@
       "main": [
         [
           {
-            "node": "More Attempts Allowed?",
+            "node": "Telemetry: Report Attempt",
             "type": "main",
             "index": 0
           },
           {
-            "node": "Telemetry: Report Attempt",
+            "node": "More Attempts Allowed?",
             "type": "main",
             "index": 0
           }
