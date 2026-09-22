@@ -308,11 +308,11 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify($json.llm_request) }}",
         "options": {
-          "timeout": 120000
+          "timeout": 20000
         }
       },
       "retryOnFail": true,
-      "maxTries": 3,
+      "maxTries": 2,
       "waitBetweenTries": 5000,
       "onError": "continueRegularOutput"
     },
@@ -347,11 +347,11 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify($json.llm_request) }}",
         "options": {
-          "timeout": 120000
+          "timeout": 20000
         }
       },
       "retryOnFail": true,
-      "maxTries": 3,
+      "maxTries": 2,
       "waitBetweenTries": 5000,
       "onError": "continueRegularOutput"
     },

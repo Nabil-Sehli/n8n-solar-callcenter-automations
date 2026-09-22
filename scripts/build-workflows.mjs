@@ -127,7 +127,15 @@ const ifNode = (wf, name, conditions, combinator, position) => ({
   },
 });
 
-const claudeRequest = (name, position) => ({
+// How long one LLM call may take and how often to retry it. The SMS drafts run
+// after the caller has been answered, so they can afford to wait out an
+// overload. The lead webhook answers only after scoring, so a hung API must
+// not hold the caller: 2 x 20s plus the 5s gap keeps it under ~45s (a good
+// answer takes 1-2s). With 3 x 120s one hanging Gemini call held a run for 259s.
+const PATIENT = { timeout: 120000, maxTries: 3 };
+const CALLER_WAITING = { timeout: 20000, maxTries: 2 };
+
+const claudeRequest = (name, position, limits = PATIENT) => ({
   name,
   type: 'n8n-nodes-base.httpRequest',
   typeVersion: 4.5,
@@ -147,17 +155,17 @@ const claudeRequest = (name, position) => ({
     sendBody: true,
     specifyBody: 'json',
     jsonBody: '={{ JSON.stringify($json.llm_request) }}',
-    options: { timeout: 120000 },
+    options: { timeout: limits.timeout },
   },
   retryOnFail: true,
-  maxTries: 3,
+  maxTries: limits.maxTries,
   waitBetweenTries: 5000,
   onError: 'continueRegularOutput',
 });
 
 // Generic Header Auth (x-goog-api-key). n8n's built-in Gemini credential
 // sends the key as a ?key= URL query parameter, which can leak into logs.
-const geminiRequest = (name, position) => ({
+const geminiRequest = (name, position, limits = PATIENT) => ({
   name,
   type: 'n8n-nodes-base.httpRequest',
   typeVersion: 4.5,
@@ -170,10 +178,10 @@ const geminiRequest = (name, position) => ({
     sendBody: true,
     specifyBody: 'json',
     jsonBody: '={{ JSON.stringify($json.llm_request) }}',
-    options: { timeout: 120000 },
+    options: { timeout: limits.timeout },
   },
   retryOnFail: true,
-  maxTries: 3,
+  maxTries: limits.maxTries,
   waitBetweenTries: 5000,
   onError: 'continueRegularOutput',
 });
@@ -375,8 +383,8 @@ function buildLeadQualification() {
   }, [720, 300]));
   const build = wf.add(code('Build LLM Request', 'code-nodes/lead-qualification/build-llm-request.js', 'runOnceForEachItem', [960, 300]));
   const useGemini = wf.add(ifNode(wf, 'Use Gemini?', [['={{ $json.llm_provider }}', 'equals', 'gemini']], 'and', [1200, 300]));
-  const gemini = wf.add(geminiRequest('Gemini: Score Lead', [1440, 160]));
-  const claude = wf.add(claudeRequest('Claude: Score Lead', [1440, 440]));
+  const gemini = wf.add(geminiRequest('Gemini: Score Lead', [1440, 160], CALLER_WAITING));
+  const claude = wf.add(claudeRequest('Claude: Score Lead', [1440, 440], CALLER_WAITING));
   const parse = wf.add(code('Parse Score', 'code-nodes/lead-qualification/parse-score.js', 'runOnceForEachItem', [1680, 300]));
 
   const leadColumns = [

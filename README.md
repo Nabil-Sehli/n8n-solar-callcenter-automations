@@ -44,7 +44,7 @@ flowchart LR
 | **Config & Prompt** | Set 3.5 | **Prompt, LLM provider and model, tier thresholds, renter cap and email recipients in one place**, editable without touching code. A sales manager can change "hot = 70" here. |
 | **Build LLM Request** | Code 2 (each item) | Plumbing only. Fills the prompt placeholders, wraps lead data in `<lead>` tags and strips that tag from `notes` so free text can't pose as instructions. Builds the body for the selected provider from **the same prompt text**. **Phone and email are never sent to the model** because it doesn't need them to score. An unknown `llm_provider` fails the run loudly. |
 | **Use Gemini?** | IF 2.3 | `llm_provider == "gemini"` goes to Gemini. Everything else (the default `anthropic`) goes to Claude. |
-| **Claude: Score Lead** | HTTP Request 4.5 → `POST https://api.anthropic.com/v1/messages` | Core node, as required. Auth uses n8n's built-in **Anthropic** credential type (it injects `x-api-key`), so no key sits in the node. Retries 3× with 5s between tries (429/529 overloads happen). **On error, continue**, so the lead still flows to the parser and gets logged. 120s timeout (the default is 10s). |
+| **Claude: Score Lead** | HTTP Request 4.5 → `POST https://api.anthropic.com/v1/messages` | Core node, as required. Auth uses n8n's built-in **Anthropic** credential type (it injects `x-api-key`), so no key sits in the node. Tries twice with 5s between tries (429/529 overloads happen). **On error, continue**, so the lead still flows to the parser and gets logged. 20s timeout per try: a good answer takes 1-2s, and a hung API must not hold the caller for minutes. |
 | **Gemini: Score Lead** | HTTP Request 4.5 → `POST .../v1beta/models/{model}:generateContent` | Same retry, continue-on-error and timeout settings. Auth is a **Header Auth** credential sending `x-goog-api-key`. n8n's built-in Gemini credential puts the key in the URL (`?key=`), where it can leak into error messages and logs. |
 | **Parse Score** | Code 2 (each item) | **One parser for both providers** (details below). Never throws. Any failure produces `scoring_status: "failed"`. |
 | **Log Lead to Sheet** | Google Sheets 4.7, append | Every lead, scored or not, lands in the `Leads` tab. Cell format **RAW** so `+16025550142` stays text and a `notes` value starting with `=` isn't run as a formula. |
@@ -327,7 +327,7 @@ for anyone who never set up a collector.
 - **Hard rules in code, judgment in the model.** Tier thresholds, the renter cap, SMS length, opt-out wording and sender ID are deterministic. Claude does what code can't: reading notes and writing natural copy.
 - **Log before acknowledging.** A 200 means the lead is saved.
 - **Failures go to people, not to `/dev/null`.** An API outage turns into manual-review emails, not dropped leads.
-- **Worst-case latency:** 3 tries with 5s gaps means the lead webhook can take ~15-20s to answer during an API outage. Set the caller's timeout accordingly.
+- **Worst-case latency:** 2 tries of up to 20s with a 5s gap, so the lead webhook answers within ~45s even when the API hangs (it then logs the lead for manual review). With the earlier 3 × 120s settings a hanging Gemini held one run for 259s. Set the caller's timeout to at least 60s.
 
 ## What I'd add next
 
