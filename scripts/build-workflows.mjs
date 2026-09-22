@@ -345,7 +345,7 @@ function buildLeadQualification() {
     '### LLM scoring',
     'Prompt, provider, model and tier thresholds live in **Config & Prompt** (no code). Set `llm_provider` to `anthropic` (default) or `gemini`.',
     '',
-    '**Use Gemini?** routes to one plain HTTP Request node. Both retry 3 times, then continue on error so **Parse Score** can mark the lead `failed` and send it to a human instead of dropping it.',
+    '**Use Gemini?** routes to one plain HTTP Request node. Both try twice with a 20s timeout (the caller is waiting), then continue on error so **Parse Score** can mark the lead `failed` and send it to a human instead of dropping it.',
     '',
     '**Parse Score** reads either response shape, strips ```json fences, skips thinking parts, clamps the score and derives the tier from the thresholds.',
   ].join('\n'), [680, -240], 1220, 380, 5));
